@@ -1,3 +1,51 @@
+libkrun (1.10.1-1asahi0.24.10) noble; urgency=medium
+
+  [ Sergio Lopez ]
+  * Update README.md
+
+  [ Jake Correnti ]
+  * Add imago crate
+  * Use SyncFormatAccess<ImagoFile> in DiskProperties
+  * Add `krun_add_disk2` API
+  * Fix Code Quality failure
+
+  [ Sergio Lopez ]
+  * Remove the remaning unneeded lifetimes
+  * virtio/net: remove unnecessary closure
+  * arch/x86_64: fix module doc comment
+  * vmm/boot_source: remove obsolete doc comments
+  * hvf: ensure vcpus run in the right thread
+
+  [ Djordje Lukic ]
+  * Emulate GICv3 on macos
+
+  [ Asahi Lina ]
+  * virtio/fs: Only change credentials if possible
+  * virtio/fs: Drop O_NOATIME open flag if we don't have CAP_FOWNER
+
+  [ Sasha Finkelstein ]
+  * net: Allow creating vsocks in listen mode.
+
+  [ Sergio Lopez ]
+  * Adopt latest clippy suggestions
+
+  [ Sasha Finkelstein ]
+  * Add pipewire cross domain channel type.
+
+  [ Sergio Lopez ]
+  * Don't use SO_REUSEPORT with UNIX sockets
+  * Bump version to 1.10.0
+  * virtio/snd: fix leftovers after gicv3 switch
+  * ci: make clippy test the "snd" feature too
+  * virtio/snd: apply clippy suggestions
+  * Temporarily vendor imago
+  * Bump version 1.10.1
+
+  [ Tobias Heider ]
+  * Add gbp.conf
+
+ -- Tobias Heider <me@tobhe.de>  Fri, 14 Mar 2025 22:42:49 +0100
+
 libkrun (1.9.8-1asahi25.24.10) oracular; urgency=medium
 
   * Change library directory from /usr/lib64 to /usr/lib
