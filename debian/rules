@@ -23,7 +23,7 @@ vendor-tarball-sanity-check:
 MAKEFLAGS += --no-print-directory GPU=1 VIRGL_RESOURCE_MAP2=1 BLK=1 NET=1 SND=1
 
 # use specific rustc path
-# export RUSTC:=/usr/bin/rustc-1.80
+export RUSTC:=/usr/bin/rustc-1.80
 
 vendor-deps:
 	if QUILT_PATCHES=debian/patches quilt applied | grep vendor-remove-unused-deps ; then \
