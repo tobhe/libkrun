@@ -1,4 +1,4 @@
-use crate::legacy::Gic;
+use crate::legacy::GicV3;
 use crate::virtio::descriptor_utils::{Reader, Writer};
 use crate::Error as DeviceError;
 
@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::result;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
 use utils::eventfd::EventFd;
@@ -51,7 +51,7 @@ pub struct BlockWorker {
     queue_evt: EventFd,
     interrupt_status: Arc<AtomicUsize>,
     interrupt_evt: EventFd,
-    intc: Option<Arc<Mutex<Gic>>>,
+    intc: Option<GicV3>,
     irq_line: Option<u32>,
 
     mem: GuestMemoryMmap,
@@ -66,7 +66,7 @@ impl BlockWorker {
         queue_evt: EventFd,
         interrupt_status: Arc<AtomicUsize>,
         interrupt_evt: EventFd,
-        intc: Option<Arc<Mutex<Gic>>>,
+        intc: Option<GicV3>,
         irq_line: Option<u32>,
         mem: GuestMemoryMmap,
         disk: DiskProperties,
@@ -228,7 +228,7 @@ impl BlockWorker {
                     Err(RequestError::InvalidDataLength)
                 } else {
                     writer
-                        .write_from_at(&self.disk.file, data_len, request_header.sector * 512)
+                        .write_from_at(&self.disk, data_len, request_header.sector * 512)
                         .map_err(RequestError::WritingToDescriptor)
                 }
             }
@@ -238,15 +238,15 @@ impl BlockWorker {
                     Err(RequestError::InvalidDataLength)
                 } else {
                     reader
-                        .read_to_at(&self.disk.file, data_len, request_header.sector * 512)
+                        .read_to_at(&self.disk, data_len, request_header.sector * 512)
                         .map_err(RequestError::ReadingFromDescriptor)
                 }
             }
             VIRTIO_BLK_T_FLUSH => match self.disk.cache_type() {
                 CacheType::Writeback => {
-                    let diskfile = self.disk.file_mut();
+                    let diskfile = self.disk.file();
                     diskfile.flush().map_err(RequestError::FlushingToDisk)?;
-                    diskfile.sync_all().map_err(RequestError::FlushingToDisk)?;
+                    diskfile.sync().map_err(RequestError::FlushingToDisk)?;
                     Ok(0)
                 }
                 CacheType::Unsafe => Ok(0),
@@ -271,7 +271,7 @@ impl BlockWorker {
         self.interrupt_status
             .fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
         if let Some(intc) = &self.intc {
-            intc.lock().unwrap().set_irq(self.irq_line.unwrap());
+            intc.set_irq(self.irq_line.unwrap());
         } else {
             self.interrupt_evt.write(1).map_err(|e| {
                 error!("Failed to signal used queue: {:?}", e);

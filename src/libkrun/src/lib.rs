@@ -18,6 +18,8 @@ use std::sync::Mutex;
 
 #[cfg(target_os = "macos")]
 use crossbeam_channel::unbounded;
+#[cfg(feature = "blk")]
+use devices::virtio::block::ImageType;
 #[cfg(feature = "net")]
 use devices::virtio::net::device::VirtioNetBackend;
 #[cfg(feature = "blk")]
@@ -93,7 +95,7 @@ struct ContextConfig {
     data_block_cfg: Option<BlockDeviceConfig>,
     #[cfg(feature = "tee")]
     tee_config_file: Option<PathBuf>,
-    unix_ipc_port_map: Option<HashMap<u32, PathBuf>>,
+    unix_ipc_port_map: Option<HashMap<u32, (PathBuf, bool)>>,
     shutdown_efd: Option<EventFd>,
     gpu_virgl_flags: Option<u32>,
     gpu_shm_size: Option<usize>,
@@ -218,12 +220,12 @@ impl ContextConfig {
         self.tee_config_file.clone()
     }
 
-    fn add_vsock_port(&mut self, port: u32, filepath: PathBuf) {
+    fn add_vsock_port(&mut self, port: u32, filepath: PathBuf, listen: bool) {
         if let Some(ref mut map) = &mut self.unix_ipc_port_map {
-            map.insert(port, filepath);
+            map.insert(port, (filepath, listen));
         } else {
-            let mut map: HashMap<u32, PathBuf> = HashMap::new();
-            map.insert(port, filepath);
+            let mut map: HashMap<u32, (PathBuf, bool)> = HashMap::new();
+            map.insert(port, (filepath, listen));
             self.unix_ipc_port_map = Some(map);
         }
     }
@@ -521,6 +523,54 @@ pub unsafe extern "C" fn krun_add_disk(
                 block_id: block_id.to_string(),
                 cache_type: CacheType::Writeback,
                 disk_image_path: disk_path.to_string(),
+                disk_image_format: ImageType::Raw,
+                is_disk_read_only: read_only,
+            };
+            cfg.add_block_cfg(block_device_config);
+        }
+        Entry::Vacant(_) => return -libc::ENOENT,
+    }
+
+    KRUN_SUCCESS
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+#[cfg(feature = "blk")]
+pub unsafe extern "C" fn krun_add_disk2(
+    ctx_id: u32,
+    c_block_id: *const c_char,
+    c_disk_path: *const c_char,
+    disk_format: u32,
+    read_only: bool,
+) -> i32 {
+    let disk_path = match CStr::from_ptr(c_disk_path).to_str() {
+        Ok(disk) => disk,
+        Err(_) => return -libc::EINVAL,
+    };
+
+    let block_id = match CStr::from_ptr(c_block_id).to_str() {
+        Ok(block_id) => block_id,
+        Err(_) => return -libc::EINVAL,
+    };
+
+    let format = match disk_format {
+        0 => ImageType::Raw,
+        1 => ImageType::Qcow2,
+        _ => {
+            // Do not continue if the user cannot specify a valid disk format
+            return -libc::EINVAL;
+        }
+    };
+
+    match CTX_MAP.lock().unwrap().entry(ctx_id) {
+        Entry::Occupied(mut ctx_cfg) => {
+            let cfg = ctx_cfg.get_mut();
+            let block_device_config = BlockDeviceConfig {
+                block_id: block_id.to_string(),
+                cache_type: CacheType::Writeback,
+                disk_image_path: disk_path.to_string(),
+                disk_image_format: format,
                 is_disk_read_only: read_only,
             };
             cfg.add_block_cfg(block_device_config);
@@ -547,6 +597,7 @@ pub unsafe extern "C" fn krun_set_root_disk(ctx_id: u32, c_disk_path: *const c_c
                 block_id: "root".to_string(),
                 cache_type: CacheType::Writeback,
                 disk_image_path: disk_path.to_string(),
+                disk_image_format: ImageType::Raw,
                 is_disk_read_only: false,
             };
             cfg.set_root_block_cfg(block_device_config);
@@ -573,6 +624,7 @@ pub unsafe extern "C" fn krun_set_data_disk(ctx_id: u32, c_disk_path: *const c_c
                 block_id: "data".to_string(),
                 cache_type: CacheType::Writeback,
                 disk_image_path: disk_path.to_string(),
+                disk_image_format: ImageType::Raw,
                 is_disk_read_only: false,
             };
             cfg.set_data_block_cfg(block_device_config);
@@ -882,15 +934,34 @@ pub unsafe extern "C" fn krun_add_vsock_port(
     port: u32,
     c_filepath: *const c_char,
 ) -> i32 {
+    krun_add_vsock_port2(ctx_id, port, c_filepath, false)
+}
+
+#[allow(clippy::missing_safety_doc)]
+#[no_mangle]
+pub unsafe extern "C" fn krun_add_vsock_port2(
+    ctx_id: u32,
+    port: u32,
+    c_filepath: *const c_char,
+    listen: bool,
+) -> i32 {
     let filepath = match CStr::from_ptr(c_filepath).to_str() {
-        Ok(f) => f,
+        Ok(f) => PathBuf::from(f.to_string()),
         Err(_) => return -libc::EINVAL,
     };
+
+    if listen {
+        match filepath.try_exists() {
+            Ok(true) => return -libc::EEXIST,
+            Err(_) => return -libc::EINVAL,
+            _ => {}
+        }
+    }
 
     match CTX_MAP.lock().unwrap().entry(ctx_id) {
         Entry::Occupied(mut ctx_cfg) => {
             let cfg = ctx_cfg.get_mut();
-            cfg.add_vsock_port(port, PathBuf::from(filepath.to_string()));
+            cfg.add_vsock_port(port, filepath, listen);
         }
         Entry::Vacant(_) => return -libc::ENOENT,
     }

@@ -24,8 +24,8 @@ use rutabaga_gfx::{
 };
 #[cfg(target_os = "linux")]
 use rutabaga_gfx::{
-    RUTABAGA_CHANNEL_TYPE_X11, RUTABAGA_MAP_ACCESS_MASK, RUTABAGA_MAP_ACCESS_READ,
-    RUTABAGA_MAP_ACCESS_RW, RUTABAGA_MAP_ACCESS_WRITE,
+    RUTABAGA_CHANNEL_TYPE_PW, RUTABAGA_CHANNEL_TYPE_X11, RUTABAGA_MAP_ACCESS_MASK,
+    RUTABAGA_MAP_ACCESS_READ, RUTABAGA_MAP_ACCESS_RW, RUTABAGA_MAP_ACCESS_WRITE,
 };
 use utils::eventfd::EventFd;
 use vm_memory::{GuestAddress, GuestMemory, GuestMemoryMmap, VolatileSlice};
@@ -38,7 +38,7 @@ use super::protocol::{
 };
 
 use super::{GpuError, Result};
-use crate::legacy::Gic;
+use crate::legacy::GicV3;
 use crate::virtio::fs::ExportTable;
 use crate::virtio::gpu::protocol::VIRTIO_GPU_FLAG_INFO_RING_IDX;
 use crate::virtio::{VirtioShmRegion, VIRTIO_MMIO_INT_VRING};
@@ -117,7 +117,7 @@ impl VirtioGpu {
         fence_state: Arc<Mutex<FenceState>>,
         interrupt_status: Arc<AtomicUsize>,
         interrupt_evt: EventFd,
-        intc: Option<Arc<Mutex<Gic>>>,
+        intc: Option<GicV3>,
         irq_line: Option<u32>,
     ) -> RutabagaFenceHandler {
         RutabagaFenceHandler::new(move |completed_fence: RutabagaFence| {
@@ -157,7 +157,7 @@ impl VirtioGpu {
 
                     interrupt_status.fetch_or(VIRTIO_MMIO_INT_VRING as usize, Ordering::SeqCst);
                     if let Some(intc) = &intc {
-                        intc.lock().unwrap().set_irq(irq_line.unwrap());
+                        intc.set_irq(irq_line.unwrap());
                     } else if let Err(e) = interrupt_evt.write(1) {
                         error!("Failed to signal used queue: {:?}", e);
                     }
@@ -178,7 +178,7 @@ impl VirtioGpu {
         queue_ctl: Arc<Mutex<VirtQueue>>,
         interrupt_status: Arc<AtomicUsize>,
         interrupt_evt: EventFd,
-        intc: Option<Arc<Mutex<Gic>>>,
+        intc: Option<GicV3>,
         irq_line: Option<u32>,
         virgl_flags: u32,
         #[cfg(target_os = "macos")] map_sender: Sender<MemoryMapping>,
@@ -209,6 +209,19 @@ impl VirtioGpu {
                     channel_type: RUTABAGA_CHANNEL_TYPE_X11,
                 });
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Ok(pw_sock_dir) = env::var("PIPEWIRE_RUNTIME_DIR")
+            .or_else(|_| env::var("XDG_RUNTIME_DIR"))
+            .or_else(|_| env::var("USERPROFILE"))
+        {
+            let name = env::var("PIPEWIRE_REMOTE").unwrap_or_else(|_| "pipewire-0".to_string());
+            let mut pw_path = PathBuf::from(pw_sock_dir);
+            pw_path.push(name);
+            rutabaga_channels.push(RutabagaChannel {
+                base_channel: pw_path,
+                channel_type: RUTABAGA_CHANNEL_TYPE_PW,
+            });
         }
         let rutabaga_channels_opt = Some(rutabaga_channels);
 

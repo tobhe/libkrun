@@ -10,7 +10,7 @@ use std::fmt::{Display, Formatter};
 use std::io;
 use std::result;
 #[cfg(not(test))]
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
@@ -19,8 +19,8 @@ use crate::vmm_config::machine_config::CpuFeaturesTemplate;
 
 use arch::aarch64::gic::GICDevice;
 use crossbeam_channel::{unbounded, Receiver, RecvTimeoutError, Sender};
-use devices::legacy::{Gic, VcpuList};
-use hvf::{HvfVcpu, HvfVm, VcpuExit};
+use devices::legacy::VcpuList;
+use hvf::{HvfVcpu, HvfVm, VcpuExit, Vcpus};
 use utils::eventfd::EventFd;
 use vm_memory::{
     Address, GuestAddress, GuestMemory, GuestMemoryError, GuestMemoryMmap, GuestMemoryRegion,
@@ -218,7 +218,6 @@ pub struct Vcpu {
     // The transmitting end of the responses channel owned by the vcpu side.
     response_sender: Sender<VcpuResponse>,
 
-    intc: Arc<Mutex<Gic>>,
     vcpu_list: Arc<VcpuList>,
 }
 
@@ -292,7 +291,6 @@ impl Vcpu {
         boot_entry_addr: GuestAddress,
         boot_receiver: Option<Receiver<u64>>,
         exit_evt: EventFd,
-        intc: Arc<Mutex<Gic>>,
         vcpu_list: Arc<VcpuList>,
     ) -> Result<Self> {
         let (event_sender, event_receiver) = unbounded();
@@ -311,7 +309,6 @@ impl Vcpu {
             event_sender: Some(event_sender),
             response_receiver: Some(response_receiver),
             response_sender,
-            intc,
             vcpu_list,
         })
     }
@@ -343,7 +340,7 @@ impl Vcpu {
     /// * `guest_mem` - The guest memory used by this microvm.
     /// * `kernel_load_addr` - Offset from `guest_mem` at which the kernel is loaded.
     pub fn configure_aarch64(&mut self, guest_mem: &GuestMemoryMmap) -> Result<()> {
-        self.mpidr = (self.id as u64) << 8;
+        self.mpidr = self.id as u64;
         self.fdt_addr = arch::aarch64::get_fdt_addr(guest_mem);
 
         Ok(())
@@ -362,11 +359,7 @@ impl Vcpu {
                 self.init_thread_local_data()
                     .expect("Cannot cleanly initialize vcpu TLS.");
 
-                init_tls_sender
-                    .send(true)
-                    .expect("Cannot notify vcpu TLS initialization.");
-
-                self.run();
+                self.run(init_tls_sender);
             })
             .map_err(Error::VcpuSpawn)?;
 
@@ -384,9 +377,8 @@ impl Vcpu {
     /// Returns error or enum specifying whether emulation was handled or interrupted.
     fn run_emulation(&mut self, hvf_vcpu: &mut HvfVcpu) -> Result<VcpuEmulation> {
         let vcpuid = hvf_vcpu.id();
-        let pending_irq = self.vcpu_list.has_pending_irq(vcpuid);
 
-        match hvf_vcpu.run(pending_irq) {
+        match hvf_vcpu.run(self.vcpu_list.clone()) {
             Ok(exit) => match exit {
                 VcpuExit::Breakpoint => {
                     debug!("vCPU {} breakpoint", vcpuid);
@@ -401,7 +393,9 @@ impl Vcpu {
                         "CpuOn: mpidr=0x{:x} entry=0x{:x} context_id={}",
                         mpidr, entry, context_id
                     );
-                    let cpuid: usize = (mpidr >> 8) as usize;
+                    // assuming a flat CPU hierarchy, only the bottom bits of mpidr should be used,
+                    // and cpuid == mpidr
+                    let cpuid: usize = mpidr as usize;
                     if let Some(boot_senders) = &self.boot_senders {
                         if let Some(sender) = boot_senders.get(cpuid - 1) {
                             sender.send(entry).unwrap()
@@ -415,6 +409,7 @@ impl Vcpu {
                 }
                 VcpuExit::MmioRead(addr, data) => {
                     if let Some(ref mmio_bus) = self.mmio_bus {
+                        debug!("vCPU {} MMIO read 0x{:x}", vcpuid, addr);
                         mmio_bus.read(vcpuid, addr, data);
                     }
                     Ok(VcpuEmulation::Handled)
@@ -455,20 +450,21 @@ impl Vcpu {
                     Ok(VcpuEmulation::WaitForEventTimeout(duration))
                 }
             },
-            Err(e) => {
-                panic!("Error running HVF vCPU: {:?}", e);
-            }
+            Err(e) => panic!("Error running HVF vCPU: {:?}", e),
         }
     }
 
     /// Main loop of the vCPU thread.
-    pub fn run(&mut self) {
+    pub fn run(&mut self, init_tls_sender: Sender<bool>) {
         let mut hvf_vcpu = HvfVcpu::new().expect("Can't create HVF vCPU");
         let hvf_vcpuid = hvf_vcpu.id();
 
+        init_tls_sender
+            .send(true)
+            .expect("Cannot notify vcpu TLS initialization.");
+
         let (wfe_sender, wfe_receiver) = unbounded();
         self.vcpu_list.register(hvf_vcpuid, wfe_sender);
-        self.intc.lock().unwrap().add_vcpu();
 
         let entry_addr = if let Some(boot_receiver) = &self.boot_receiver {
             boot_receiver.recv().unwrap()
