@@ -7,7 +7,7 @@ Subject: Make cargo binary path configurable
  1 file changed, 3 insertions(+), 3 deletions(-)
 
 diff --git a/Makefile b/Makefile
-index 0df0290..884add9 100644
+index 36f9807..1610b4f 100644
 --- a/Makefile
 +++ b/Makefile
 @@ -87,7 +87,7 @@ $(INIT_BINARY): $(INIT_SRC)
